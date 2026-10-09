@@ -5,7 +5,6 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# Render ಗಾಗಿ ಸಣ್ಣ dummy ವೆಬ್ ಸರ್ವರ್ (Render ಲೈವ್ ಆಗಿರಲು ಇದು ಅಗತ್ಯ)
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,8 +19,8 @@ def run_web_server():
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Gemini API URL
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+# Auth Key (AQ...) ಗೆ ಸರಿಹೊಂದುವ ಅಧಿಕೃತ v1beta ಎಂಡ್‌ಪಾಯಿಂಟ್
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 async def reply_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -30,20 +29,26 @@ async def reply_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
+    # ಹೊಸ AQ ಮಾದರಿಯ ಕೀಲಿಗಳನ್ನು ಸ್ವೀಕರಿಸಲು x-goog-api-key ಹೆಡರ್ ಬಳಕೆ
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
     payload = {
         "contents": [{
             "parts": [{
                 "text": (
-                    f"You are an expert educational tutor for Dt24Classes. "
-                    f"Provide an accurate, clear, and polite answer in the same language "
-                    f"(Kannada or English) for the student's question: {user_text}"
+                    f"You are a helpful educational tutor for Dt24Classes. "
+                    f"Answer this student question accurately in the same language "
+                    f"(Kannada or English): {user_text}"
                 )
             }]
         }]
     }
 
     try:
-        response = requests.post(GEMINI_URL, json=payload, timeout=30)
+        response = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=30)
         res_data = response.json()
 
         if "candidates" in res_data and len(res_data["candidates"]) > 0:
@@ -55,15 +60,15 @@ async def reply_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(answer)
         else:
-            print("Gemini API Error Response:", res_data)
-            await update.message.reply_text("ಕ್ಷಮಿಸಿ, ಉತ್ತರಿಸಲು ಸಾಧ್ಯವಾಗುತ್ತಿಲ್ಲ. ದಯವಿಟ್ಟು ಪುನಃ ಪ್ರಯತ್ನಿಸಿ.")
+            err_msg = res_data.get("error", {}).get("message", "API ಕಡೆಯಿಂದ ಉತ್ತರ ಬರಲಿಲ್ಲ.")
+            await update.message.reply_text(f"ತೊಂದರೆ: {err_msg}")
+            
     except Exception as e:
-        print(f"Exception Error: {e}")
-        await update.message.reply_text("ಸರ್ವರ್ ಸಂಪರ್ಕದಲ್ಲಿ ತೊಂದರೆಯಾಗಿದೆ.")
+        await update.message.reply_text(f"ಸರ್ವರ್ ದೋಷ: {str(e)}")
 
 if __name__ == "__main__":
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-        print("Error: API Keys not set in Environment Variables!")
+        print("Error: Keys not set!")
     else:
         threading.Thread(target=run_web_server, daemon=True).start()
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
