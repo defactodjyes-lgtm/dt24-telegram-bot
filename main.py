@@ -1,13 +1,27 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# ಕೀಗಳನ್ನು ಸರ್ವರ್‌ನ ಎನ್ವಿರಾನ್‌ಮೆಂಟ್‌ನಿಂದ ಪಡೆಯುವುದು (ಸುರಕ್ಷಿತ ವಿಧಾನ)
+# Render ಗಾಗಿ ಸಣ್ಣ dummy ವೆಬ್ ಸರ್ವರ್ (Render ಲೈವ್ ಆಗಿರಲು ಇದು ಅಗತ್ಯ)
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Dt24Classes Bot is Running Live!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
+# Gemini API URL
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
 async def reply_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -35,21 +49,23 @@ async def reply_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "candidates" in res_data and len(res_data["candidates"]) > 0:
             candidate = res_data["candidates"][0]
             parts = candidate.get("content", {}).get("parts", [])
-            answer = "".join([p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)])
+            answer = "".join([p.get("text", "") for p in parts if "text" in p])
             if not answer and len(parts) > 0:
                 answer = parts[0].get("text", "")
 
             await update.message.reply_text(answer)
         else:
-            print("API Response Error:", res_data)
+            print("Gemini API Error Response:", res_data)
             await update.message.reply_text("ಕ್ಷಮಿಸಿ, ಉತ್ತರಿಸಲು ಸಾಧ್ಯವಾಗುತ್ತಿಲ್ಲ. ದಯವಿಟ್ಟು ಪುನಃ ಪ್ರಯತ್ನಿಸಿ.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Exception Error: {e}")
+        await update.message.reply_text("ಸರ್ವರ್ ಸಂಪರ್ಕದಲ್ಲಿ ತೊಂದರೆಯಾಗಿದೆ.")
 
 if __name__ == "__main__":
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
         print("Error: API Keys not set in Environment Variables!")
     else:
+        threading.Thread(target=run_web_server, daemon=True).start()
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), reply_question))
         print("Dt24Classes AI ಬಾಟ್ ಯಶಸ್ವಿಯಾಗಿ ಚಾಲನೆಯಲ್ಲಿದೆ...")
