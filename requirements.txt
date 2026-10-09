@@ -1,2 +1,4 @@
 google-genai
-requests
+python-telegram-bot
+flask
+gunicorn
