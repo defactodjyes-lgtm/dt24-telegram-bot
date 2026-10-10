@@ -16,44 +16,55 @@ from telegram.ext import (
     filters,
 )
 
-# Logging
+# ---------------- LOGGING ----------------
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("dt24classes")
 
 web = Flask(__name__)
 
-# Render Environment Variables
+# ---------------- CONFIGURATION ----------------
+
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 API_KEY = os.environ["GEMINI_API_KEY"].strip()
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.8-flash",
+).strip()
 
 client = genai.Client(api_key=API_KEY)
 
 SYSTEM_PROMPT = """
 You are Dt24Classes AI Tutor.
 
-Rules:
-1. Reply in Kannada when the student writes in Kannada.
-2. Otherwise reply in the student's language.
-3. Teach students clearly, accurately and patiently.
-4. Explain mathematics and science step by step.
-5. For current affairs, current office holders, news and changing facts,
-   use Google Search to verify the latest information.
-6. Never present old information as current.
-7. If current information cannot be verified, clearly say so.
-8. Use the supplied India date when answering questions about today's date.
-9. Never invent facts, dates, search results or sources.
+- Answer educational questions clearly and accurately.
+- Reply in Kannada when the student writes in Kannada.
+- Otherwise reply in the student's language.
+- Explain maths and science step by step.
+- Use Google Search to verify current affairs when available.
+- Never invent current facts or claim to have verified something
+  when you have not.
+- Use the supplied India date for questions about today's date.
 """
 
+# ---------------- WEB HEALTH CHECK ----------------
 
 @web.route("/")
 def home():
-    return "Dt24Classes AI Tutor is Running!", 200
+    return "Dt24Classes AI Tutor is running!", 200
 
+
+@web.route("/health")
+def health():
+    return {"status": "ok"}, 200
+
+
+# ---------------- TELEGRAM COMMANDS ----------------
 
 async def start(
     update: Update,
@@ -65,9 +76,9 @@ async def start(
         "ನಮಸ್ಕಾರ! Dt24Classes AI Tutor ಗೆ ಸ್ವಾಗತ.\n\n"
         "ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಕನ್ನಡ ಅಥವಾ English ನಲ್ಲಿ ಕೇಳಿ.\n\n"
         "Reasoning mode:\n"
-        "/mode low - ವೇಗದ ಉತ್ತರ\n"
-        "/mode medium - ಸಾಮಾನ್ಯ ಬಳಕೆ\n"
-        "/mode high - ಕಠಿಣ ಪ್ರಶ್ನೆಗಳು\n\n"
+        "/mode low\n"
+        "/mode medium\n"
+        "/mode high\n\n"
         "/reset - ಸಂಭಾಷಣೆ ಮರುಹೊಂದಿಸಲು"
     )
 
@@ -77,12 +88,12 @@ async def set_mode(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     if not context.args:
-        current = context.user_data.get(
+        level = context.user_data.get(
             "thinking_level", "medium"
         )
         await update.effective_message.reply_text(
-            f"ಈಗಿನ mode: {current}\n"
-            "ಬದಲಿಸಲು /mode low, /mode medium ಅಥವಾ /mode high ಬಳಸಿ."
+            f"ಈಗಿನ mode: {level}\n"
+            "ಬಳಸಿ: /mode low, /mode medium, /mode high"
         )
         return
 
@@ -90,17 +101,14 @@ async def set_mode(
 
     if level not in ("low", "medium", "high"):
         await update.effective_message.reply_text(
-            "ಸರಿಯಾದ command:\n"
-            "/mode low\n"
-            "/mode medium\n"
-            "/mode high"
+            "ಸರಿಯಾದ ಆಯ್ಕೆ: /mode low, /mode medium ಅಥವಾ /mode high"
         )
         return
 
     context.user_data["thinking_level"] = level
 
     await update.effective_message.reply_text(
-        f"Reasoning mode {level.upper()} ಆಗಿ ಬದಲಾಯಿಸಲಾಗಿದೆ."
+        f"Reasoning mode {level.upper()} ಆಗಿದೆ."
     )
 
 
@@ -115,11 +123,18 @@ async def reset(
     )
 
 
+# ---------------- GEMINI API ----------------
+
 async def ask_gemini(prompt, level):
-    """Call Gemini and retry temporary 503 errors."""
     for attempt in range(3):
         try:
-            return await asyncio.to_thread(
+            logger.info(
+                "Calling Gemini model=%s, attempt=%s",
+                MODEL,
+                attempt + 1,
+            )
+
+            response = await asyncio.to_thread(
                 client.interactions.create,
                 model=MODEL,
                 input=prompt,
@@ -129,27 +144,31 @@ async def ask_gemini(prompt, level):
                 },
             )
 
-        except Exception as exc:
-            error_text = str(exc).lower()
+            logger.info("Gemini response received")
+            return response
 
-            temporary_error = (
-                "503" in error_text
-                or "unavailable" in error_text
-                or "temporarily unavailable" in error_text
+        except Exception as exc:
+            logger.exception(
+                "Gemini API request failed: %s",
+                type(exc).__name__,
             )
 
-            if temporary_error and attempt < 2:
-                wait_seconds = 2 * (attempt + 1)
-                logger.warning(
-                    "Temporary Gemini error. Retry %s/2 after %s seconds.",
-                    attempt + 1,
-                    wait_seconds,
-                )
-                await asyncio.sleep(wait_seconds)
+            error = str(exc).lower()
+
+            temporary = (
+                "503" in error
+                or "unavailable" in error
+                or "temporarily unavailable" in error
+            )
+
+            if temporary and attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
                 continue
 
             raise
 
+
+# ---------------- MESSAGE HANDLER ----------------
 
 async def reply_question(
     update: Update,
@@ -157,29 +176,32 @@ async def reply_question(
 ):
     message = update.effective_message
 
-    if not message or not message.text:
+    logger.info(
+        "DEBUG: Telegram update received; update_id=%s",
+        update.update_id,
+    )
+
+    if message is None or not message.text:
+        logger.info("Update contains no text message")
         return
 
     question = message.text.strip()
 
-    if not question:
-        return
+    logger.info(
+        "DEBUG: Text message received; length=%s",
+        len(question),
+    )
 
-    # Current date in India
     today = datetime.now(
         ZoneInfo("Asia/Kolkata")
-    ).strftime("%Y-%m-%d")
+    ).strftime("%d %B %Y")
 
     level = context.user_data.get(
         "thinking_level", "medium"
     )
 
     history = context.user_data.setdefault("history", [])
-
-    # Save latest student question
     history.append(("Student", question))
-
-    # Keep recent conversation only
     history = history[-10:]
     context.user_data["history"] = history
 
@@ -190,68 +212,76 @@ async def reply_question(
 
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
-        f"Current date in India (Asia/Kolkata): {today}\n\n"
-        "Important date instructions:\n"
-        "- Treat the supplied date as today's actual date in India.\n"
-        "- Do not call today's date a future date.\n"
-        "- For current office holders and current affairs, "
-        "verify using Google Search before answering.\n"
-        "- If search fails, do not pretend that verification succeeded.\n\n"
+        f"Today's date in India is {today}.\n"
+        "For current office holders, news and other changing facts, "
+        "verify using Google Search when available. "
+        "If verification fails, say so honestly. "
+        "Do not describe today's supplied date as a future date.\n\n"
         f"Recent conversation:\n{conversation}\n\n"
-        "Answer the student's latest question clearly."
-    )
-
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action="typing",
+        "Tutor: Answer the latest student question."
     )
 
     try:
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id,
+            action="typing",
+        )
+
         response = await ask_gemini(prompt, level)
 
-        answer = response.output_text
+        answer = getattr(response, "output_text", None)
 
         if not answer:
-            answer = (
-                "ಕ್ಷಮಿಸಿ, ಈ ಬಾರಿ ಉತ್ತರ ಲಭ್ಯವಿಲ್ಲ. "
-                "ಮತ್ತೊಮ್ಮೆ ಪ್ರಯತ್ನಿಸಿ."
+            logger.error("Gemini returned no output text")
+            await message.reply_text(
+                "ಕ್ಷಮಿಸಿ, ಈ ಬಾರಿ ಉತ್ತರ ಲಭ್ಯವಿಲ್ಲ. ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ."
             )
+            return
 
         history.append(("Tutor", answer))
         context.user_data["history"] = history[-10:]
 
-        # Telegram message length limit
-        for i in range(0, len(answer), 4000):
-            await message.reply_text(answer[i:i + 4000])
+        for index in range(0, len(answer), 4000):
+            await message.reply_text(answer[index:index + 4000])
+
+        logger.info("Answer sent to Telegram successfully")
 
     except Exception as exc:
-        logger.exception("Gemini API request failed")
+        error = str(exc).lower()
 
-        error_text = str(exc).lower()
+        logger.exception(
+            "Message handling failed; exception=%s",
+            type(exc).__name__,
+        )
 
-        if "429" in error_text or "resource_exhausted" in error_text:
-            user_message = (
-                "Gemini API quota ಮೀರಿದೆ. "
-                "Google AI Studioನಲ್ಲಿ usage ಮತ್ತು quota ಪರಿಶೀಲಿಸಿ."
+        if "429" in error or "resource_exhausted" in error:
+            reply = (
+                "Gemini API quota ಅಥವಾ rate limit ಸಮಸ್ಯೆ ಇದೆ. "
+                "Google AI Studio Usage ಪರಿಶೀಲಿಸಿ."
             )
-        elif "503" in error_text or "unavailable" in error_text:
-            user_message = (
+        elif "503" in error or "unavailable" in error:
+            reply = (
                 "Gemini ಸೇವೆ ತಾತ್ಕಾಲಿಕವಾಗಿ ಲಭ್ಯವಿಲ್ಲ. "
                 "ಸ್ವಲ್ಪ ಸಮಯದ ನಂತರ ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ."
             )
-        elif "401" in error_text or "403" in error_text:
-            user_message = (
-                "Gemini API authentication ಅಥವಾ permission ಸಮಸ್ಯೆ ಇದೆ. "
-                "Render Environmentನಲ್ಲಿ GEMINI_API_KEY ಪರಿಶೀಲಿಸಿ."
+        elif "401" in error or "403" in error:
+            reply = (
+                "Gemini API key ಅಥವಾ permission ಸಮಸ್ಯೆ ಇದೆ. "
+                "Render Environment ಪರಿಶೀಲಿಸಿ."
             )
         else:
-            user_message = (
-                "Gemini API error ಬಂದಿದೆ. "
-                "ನಿಖರ ಕಾರಣಕ್ಕಾಗಿ Render Logs ಪರಿಶೀಲಿಸಿ."
+            reply = (
+                "AI ಸೇವೆಯಲ್ಲಿ ದೋಷವಿದೆ. "
+                "Render Logs ಪರಿಶೀಲಿಸಿ."
             )
 
-        await message.reply_text(user_message)
+        try:
+            await message.reply_text(reply)
+        except Exception:
+            logger.exception("Could not send error message to Telegram")
 
+
+# ---------------- START BOT ----------------
 
 async def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -269,9 +299,9 @@ async def run_bot():
 
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(drop_pending_updates=False)
 
-    logger.info("Telegram bot started successfully.")
+    logger.info("Telegram polling started successfully")
 
     try:
         await asyncio.Event().wait()
@@ -282,18 +312,26 @@ async def run_bot():
 
 
 def start_bot():
-    asyncio.run(run_bot())
+    try:
+        asyncio.run(run_bot())
+    except Exception:
+        logger.exception("Telegram bot stopped unexpectedly")
 
 
 if __name__ == "__main__":
-    threading.Thread(
+    bot_thread = threading.Thread(
         target=start_bot,
         daemon=True,
-    ).start()
+        name="telegram-bot",
+    )
+    bot_thread.start()
 
     port = int(os.environ.get("PORT", "10000"))
+
+    logger.info("Starting Flask health server on port %s", port)
 
     web.run(
         host="0.0.0.0",
         port=port,
+        use_reloader=False,
     )
